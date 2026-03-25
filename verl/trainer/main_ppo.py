@@ -17,6 +17,8 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 import os
 import socket
+import time
+from datetime import datetime
 
 import hydra
 import ray
@@ -281,6 +283,19 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        setup_start_ts = time.perf_counter()
+        setup_stage_ts = setup_start_ts
+
+        def log_setup_stage(stage: str) -> None:
+            nonlocal setup_stage_ts
+            now = time.perf_counter()
+            wall_clock = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[SETUP][{wall_clock}] {stage} | "
+                f"stage_s={now - setup_stage_ts:.2f} | elapsed_s={now - setup_start_ts:.2f}"
+            )
+            setup_stage_ts = now
+
         print_full_config = os.getenv("VERL_PRINT_FULL_CONFIG", "0") == "1"
         if print_full_config:
             # resolve=True will evaluate symbolic values.
@@ -300,6 +315,7 @@ class TaskRunner:
                 f"val_files={config.data.val_files}"
             )
         OmegaConf.resolve(config)
+        log_setup_stage("resolved config")
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
@@ -308,6 +324,7 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
+        log_setup_stage("registered role workers and mappings")
 
         # validate config
         validate_config(
@@ -315,12 +332,14 @@ class TaskRunner:
             use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
+        log_setup_stage("validated config")
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
         )
+        log_setup_stage("prepared local model path")
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
@@ -329,8 +348,10 @@ class TaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        log_setup_stage("initialized tokenizer/processor")
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
+        log_setup_stage("initialized resource pool manager")
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
@@ -352,6 +373,7 @@ class TaskRunner:
             max_samples=config.data.get("val_max_samples", -1),
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
+        log_setup_stage("built datasets and sampler")
 
         # Initialize the PPO trainer.
         trainer = RayPPOTrainer(
@@ -366,8 +388,15 @@ class TaskRunner:
             collate_fn=collate_fn,
             train_sampler=train_sampler,
         )
+        log_setup_stage("constructed trainer")
         # Initialize the workers of the trainer.
         trainer.init_workers()
+        log_setup_stage("initialized trainer workers")
+        wall_clock = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[SETUP][{wall_clock}] pre-training setup complete | "
+            f"total_setup_s={time.perf_counter() - setup_start_ts:.2f}"
+        )
 
         # Start the training process.
         trainer.fit()

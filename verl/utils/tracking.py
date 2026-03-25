@@ -184,20 +184,23 @@ class Tracking:
                 logger_instance.log(data=data, step=step)
 
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-        if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
-        if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
-        if "clearml" in self.logger:
-            self.logger["clearml"].finish()
-        if "trackio" in self.logger:
-            self.logger["trackio"].finish()
-        if "file" in self.logger:
-            self.logger["file"].finish()
+        # Destructor can run while asyncio loop is still active or interpreter is shutting down.
+        # Guard finalizers to avoid noisy teardown-time exceptions.
+        for backend, finish_call in (
+            ("wandb", lambda: self.logger["wandb"].finish(exit_code=0)),
+            ("swanlab", lambda: self.logger["swanlab"].finish()),
+            ("vemlp_wandb", lambda: self.logger["vemlp_wandb"].finish(exit_code=0)),
+            ("tensorboard", lambda: self.logger["tensorboard"].finish()),
+            ("clearml", lambda: self.logger["clearml"].finish()),
+            ("trackio", lambda: self.logger["trackio"].finish()),
+            ("file", lambda: self.logger["file"].finish()),
+        ):
+            if backend not in self.logger:
+                continue
+            try:
+                finish_call()
+            except Exception as e:
+                print(f"[Tracking] Ignored teardown error for {backend}: {e}")
 
 
 class ClearMLLogger:
